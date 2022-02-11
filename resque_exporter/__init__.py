@@ -39,7 +39,7 @@ def main():
     parser.add_argument('-p', '--port', dest='port', type=int,
                         default=os.getenv('RESQUE_EXPORTER_PORT', "9447"),
                         help="Port to expose metrics")
-    parser.add_argument('-l', '--loglevel', dest='loglevel', choices=['INFO, DEBUG'],
+    parser.add_argument('-l', '--loglevel', dest='loglevel', choices=['INFO', 'DEBUG'],
                         default="INFO", help="Set application loglevel INFO, DEBUG")
     parser.add_argument('--custom-metrics', type=json_cmdline_value,
                         default=os.getenv('RESQUE_EXPORTER_CUSTOM_METRICS', None),
