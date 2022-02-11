@@ -1,23 +1,53 @@
 import logging
+import re
 
 import redis
-from prometheus_client.core import GaugeMetricFamily, CounterMetricFamily
+from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
 RESQUE_NAMESPACE_PREFIX = 'resque'
 
 
+METRIC_FAMILY_CLASS_FOR_TYPE = {
+    'counter': CounterMetricFamily,
+    'gauge': GaugeMetricFamily,
+}
+
+
 class ResqueCollector:
-    def __init__(self, redis_url, namespace=None):
-        self._r = redis.from_url(redis_url, charset="utf-8", decode_responses=True)
+    def __init__(self, redis_url, namespace=None, custom_metrics=None):
+        self._r = redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
         self._r_namespace = namespace
         self.queues = []
         self.workers = []
+        self.custom_metrics = []
+        if custom_metrics:
+            logging.debug("Custom metrics config: %s", custom_metrics)
+            for cm in custom_metrics:
+                label_regex = cm['label_regex']
+                if isinstance(label_regex, str):
+                    label_regex = re.compile(cm['label_regex'])
+                self.custom_metrics.append({
+                    'metric_family_class': METRIC_FAMILY_CLASS_FOR_TYPE[cm['type']],
+                    'metric_family_kwargs': {
+                        'name': cm['name'],
+                        'documentation': cm['documentation'],
+                        'labels': label_regex.groupindex.keys(),
+                    },
+                    'redis_pattern': cm['redis_pattern'],
+                    'label_regex': label_regex,
+                })
 
     def _r_key(self, key):
         if self._r_namespace:
             return f"{RESQUE_NAMESPACE_PREFIX}:{self._r_namespace}:{key}"
 
         return f"{RESQUE_NAMESPACE_PREFIX}:{key}"
+
+    def _remove_r_key_prefix(self, key):
+        r_key_prefix = self._r_key("")
+        if not key.startswith(r_key_prefix):
+            raise ValueError('Cannot remove prefix from key %r' % (key,))
+        return key[len(r_key_prefix):]
 
     def collect(self):
         logging.info("Collecting metrics from redis broker")
@@ -31,6 +61,7 @@ class ResqueCollector:
         yield self.metric_workers()
         yield self.metric_working_workers()
         yield self.metric_workers_per_queue()
+        yield from self.metric_custom_metrics()
         logging.info("Finished collecting metrics from redis broker")
 
     def metric_failed_jobs(self):
@@ -96,3 +127,31 @@ class ResqueCollector:
             metric.add_metric([queue, ], num_of_workers)
 
         return metric
+
+    def metric_custom_metrics(self):
+        for cm in self.custom_metrics:
+            label_names = cm['metric_family_kwargs']['labels']
+            redis_pattern = self._r_key(cm["redis_pattern"])
+
+            collected_values = {}
+            for redis_key in self._r.scan_iter(match=redis_pattern):
+                value = int(self._r.get(redis_key))
+                key = self._remove_r_key_prefix(redis_key)
+                logging.debug('Metric %s=%r', key, value)
+                label_match = cm["label_regex"].match(key)
+                if label_match is None:
+                    continue
+                labels_dict = label_match.groupdict()
+                labels_tuple = tuple(labels_dict[label] for label in label_names)
+                collected_values.setdefault(labels_tuple, 0)
+                collected_values[labels_tuple] += value
+
+            if not collected_values:
+                continue
+
+            metric = cm['metric_family_class'](**cm['metric_family_kwargs'])
+
+            for label_tuple, value in collected_values.items():
+                metric.add_metric(labels=label_tuple, value=value)
+
+            yield metric
