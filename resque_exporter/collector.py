@@ -1,5 +1,7 @@
 import logging
 import re
+import threading
+import time
 
 import redis
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
@@ -13,6 +15,44 @@ METRIC_FAMILY_CLASS_FOR_TYPE = {
 }
 
 
+class RedisWildcardLookup:
+    def __init__(self, redis, loop_interval_seconds=60):
+        self.redis = redis
+        self._match_cache = {}
+        self._loop_interval_seconds = loop_interval_seconds
+        self._bg_thread = threading.Thread(
+            target=self._match_refresh_loop,
+            name='redis wildcard refresh loop',
+        )
+        self._bg_thread.daemon = True
+
+    def _match_refresh_loop(self):
+        while True:
+            logging.debug('RedisWildcardLookup: match refresh loop: starting..')
+            start_time = time.monotonic()
+            for wildcard in list(self._match_cache.keys()):
+                self._match_cache[wildcard] = list(self._fetch_keys(wildcard))
+            end_time = time.monotonic()
+            loop_duration = end_time - start_time
+            logging.debug('RedisWildcardLookup: match refresh loop took %.3fs',
+                          loop_duration)
+            sleep_interval = self._loop_interval_seconds - loop_duration
+            if sleep_interval > 0:
+                time.sleep(sleep_interval)
+
+    def get_keys(self, pattern):
+        if not self._bg_thread.is_alive():
+            self._bg_thread.start()
+        self._match_cache.setdefault(pattern, None)
+        cached_val = self._match_cache[pattern]
+        if cached_val is not None:
+            return cached_val
+        return list(self._fetch_keys(pattern))
+
+    def _fetch_keys(self, pattern):
+        yield from self.redis.scan_iter(match=pattern)
+
+
 class ResqueCollector:
     def __init__(self, redis_url, namespace=None, custom_metrics=None):
         self._r = redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
@@ -21,6 +61,7 @@ class ResqueCollector:
         self.workers = []
         self.custom_metrics = []
         if custom_metrics:
+            self._wildcard_lookup = RedisWildcardLookup(self._r)
             logging.debug("Custom metrics config: %s", custom_metrics)
             for cm in custom_metrics:
                 label_regex = cm['label_regex']
@@ -134,13 +175,14 @@ class ResqueCollector:
             redis_pattern = self._r_key(cm["redis_pattern"])
 
             collected_values = {}
-            for redis_key in self._r.scan_iter(match=redis_pattern):
-                value = int(self._r.get(redis_key))
+            for redis_key in self._wildcard_lookup.get_keys(redis_pattern):
                 key = self._remove_r_key_prefix(redis_key)
-                logging.debug('Metric %s=%r', key, value)
+                raw_value = self._r.get(redis_key)
                 label_match = cm["label_regex"].match(key)
-                if label_match is None:
+                if raw_value is None or label_match is None:
                     continue
+                value = int(raw_value)
+                logging.debug('Metric %s=%r', key, value)
                 labels_dict = label_match.groupdict()
                 labels_tuple = tuple(labels_dict[label] for label in label_names)
                 collected_values.setdefault(labels_tuple, 0)
