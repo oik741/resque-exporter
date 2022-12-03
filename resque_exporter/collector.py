@@ -96,6 +96,17 @@ class ResqueCollector:
             raise ValueError('Cannot remove prefix from key %r' % (key,))
         return key[len(r_key_prefix):]
 
+    def describe(self):
+        logging.info("Describing metrics")
+        yield self._failed_jobs_metricfamily()
+        yield self._processed_jobs_metricfamily()
+        yield self._queues_metricfamily()
+        yield self._jobs_in_queue_metricfamily()
+        yield self._workers_metricfamily()
+        yield self._working_workers_metricfamily()
+        yield self._workers_per_queue_metricfamily()
+        yield from self._custom_metrics_metricfamilies()
+
     def collect(self):
         logging.info("Collecting metrics from redis broker")
         self.queues = self._r.smembers(self._r_key('queues'))
@@ -111,27 +122,39 @@ class ResqueCollector:
         yield from self.metric_custom_metrics()
         logging.info("Finished collecting metrics from redis broker")
 
+    def _failed_jobs_metricfamily(self):
+        return CounterMetricFamily('resque_failed_jobs', "Total number of failed jobs")
+
     def metric_failed_jobs(self):
         failed_jobs_amount = self._r.get(self._r_key('stat:failed')) or 0
-        metric = CounterMetricFamily('resque_failed_jobs', "Total number of failed jobs")
+        metric = self._failed_jobs_metricfamily()
         metric.add_metric([], failed_jobs_amount)
         return metric
 
+    def _processed_jobs_metricfamily(self):
+        return CounterMetricFamily('resque_processed_jobs', "Total number of processed jobs")
+
     def metric_processed_jobs(self):
         processed_jobs_amount = self._r.get(self._r_key('stat:processed')) or 0
-        metric = CounterMetricFamily('resque_processed_jobs', "Total number of processed jobs")
+        metric = self._processed_jobs_metricfamily()
         metric.add_metric([], processed_jobs_amount)
         return metric
 
+    def _queues_metricfamily(self):
+        return GaugeMetricFamily('resque_queues', "Number of queues")
+
     def metric_queues(self):
-        metric = GaugeMetricFamily('resque_queues', "Number of queues")
+        metric = self._queues_metricfamily()
         metric.add_metric([], len(self.queues))
         return metric
 
+    def _jobs_in_queue_metricfamily(self):
+        return GaugeMetricFamily('resque_jobs_in_queue',
+                                 "Number of jobs in a queue",
+                                 labels=['queue'])
+
     def metric_jobs_in_queue(self):
-        metric = GaugeMetricFamily('resque_jobs_in_queue',
-                                   "Number of jobs in a queue",
-                                   labels=['queue'])
+        metric = self._jobs_in_queue_metricfamily()
         for queue in self.queues:
             num_jobs = self._r.llen(self._r_key(f'queue:{queue}'))
             metric.add_metric([queue, ], num_jobs)
@@ -140,19 +163,30 @@ class ResqueCollector:
         metric.add_metric(['failed', ], num_jobs_in_failed_queue)
         return metric
 
+    def _workers_metricfamily(self):
+        return GaugeMetricFamily('resque_workers', "Number of workers")
+
     def metric_workers(self):
-        metric = GaugeMetricFamily('resque_workers', "Number of workers")
+        metric = self._workers_metricfamily()
         metric.add_metric([], len(self.workers))
         return metric
+
+    def _working_workers_metricfamily(self):
+        return GaugeMetricFamily('resque_working_workers', "Number of working workers")
 
     def metric_working_workers(self):
         num_working_workers = 0
         for worker in self.workers:
             if self._r.exists(self._r_key(f'worker:{worker}')):
                 num_working_workers += 1
-        metric = GaugeMetricFamily('resque_working_workers', "Number of working workers")
+        metric = self._working_workers_metricfamily()
         metric.add_metric([], num_working_workers)
         return metric
+
+    def _workers_per_queue_metricfamily(self):
+        return GaugeMetricFamily('resque_workers_per_queue',
+                                 "Number of workers handling a specific queue",
+                                 labels=['queue'])
 
     def metric_workers_per_queue(self):
         workers_per_queue = {}
@@ -167,13 +201,15 @@ class ResqueCollector:
             for queue in worker_queues:
                 workers_per_queue[queue] = workers_per_queue.get(queue, 0) + 1
 
-        metric = GaugeMetricFamily('resque_workers_per_queue',
-                                   "Number of workers handling a specific queue",
-                                   labels=['queue'])
+        metric = self._workers_per_queue_metricfamily()
         for queue, num_of_workers in workers_per_queue.items():
             metric.add_metric([queue, ], num_of_workers)
 
         return metric
+
+    def _custom_metrics_metricfamilies(self):
+        for cm in self.custom_metrics:
+            yield cm['metric_family_class'](**cm['metric_family_kwargs'])
 
     def metric_custom_metrics(self):
         for cm in self.custom_metrics:
