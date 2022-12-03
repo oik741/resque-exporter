@@ -51,9 +51,7 @@ class RedisWildcardLookup:
         self._ensure_bg_thread_is_alive()
         self._match_cache.setdefault(pattern, None)
         cached_val = self._match_cache[pattern]
-        if cached_val is not None:
-            return cached_val
-        return list(self._fetch_keys(pattern))
+        return cached_val or []
 
     def _fetch_keys(self, pattern):
         yield from self.redis.scan_iter(match=pattern)
