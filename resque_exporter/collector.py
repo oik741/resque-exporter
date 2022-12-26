@@ -20,11 +20,18 @@ class RedisWildcardLookup:
         self.redis = redis
         self._match_cache = {}
         self._loop_interval_seconds = loop_interval_seconds
+        self._bg_thread = None
+
+    def _ensure_bg_thread_is_alive(self):
+        if self._bg_thread and self._bg_thread.is_alive():
+            return
+
         self._bg_thread = threading.Thread(
             target=self._match_refresh_loop,
             name='redis wildcard refresh loop',
         )
         self._bg_thread.daemon = True
+        self._bg_thread.start()
 
     def _match_refresh_loop(self):
         while True:
@@ -41,8 +48,7 @@ class RedisWildcardLookup:
                 time.sleep(sleep_interval)
 
     def get_keys(self, pattern):
-        if not self._bg_thread.is_alive():
-            self._bg_thread.start()
+        self._ensure_bg_thread_is_alive()
         self._match_cache.setdefault(pattern, None)
         cached_val = self._match_cache[pattern]
         if cached_val is not None:

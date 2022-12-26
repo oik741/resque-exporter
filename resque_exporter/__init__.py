@@ -12,7 +12,7 @@ from prometheus_client.core import REGISTRY
 from .collector import ResqueCollector
 
 
-def sigterm_handler():
+def sigterm_handler(_signo, _stackframe):
     logging.info("Shutting down.")
     sys.exit(os.EX_OK)
 
